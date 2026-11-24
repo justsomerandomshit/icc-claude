@@ -23,6 +23,12 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              // Claude sidebar SDK: only loaded when the sidebar is opened
+              name: 'chunk-claude',
+              test: /node_modules[\\/]@anthropic-ai[\\/]/,
+              priority: 20,
+            },
+            {
               name: 'chunk-vendors',
               test: /node_modules/,
               priority: 10,

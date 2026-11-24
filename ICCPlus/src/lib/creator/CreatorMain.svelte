@@ -248,6 +248,13 @@
         </Item>
     </List>
 </Menu>
+{#if claudeUi.open}
+    {#await import('$lib/claude/ClaudeSidebar.svelte') then sidebar}
+        <sidebar.default />
+    {:catch}
+        <div class="claude-load-error">Could not load the Claude sidebar. Check your connection and try again.</div>
+    {/await}
+{/if}
 <Tooltip />
 
 <script lang="ts">
@@ -285,6 +292,7 @@
     import ObjectSelectDialog from './Object/ObjectSelectDialog.svelte';
 	import { get } from 'svelte/store';
     import { tick } from 'svelte';
+    import { claudeUi, toggleClaude } from '$lib/claude/ui.svelte';
 
     const upperMenuCompoenet = [{
         action: () => {
@@ -347,6 +355,12 @@
         },
         text: 'See ID/Title List',
         icon: 'mdi mdi-clipboard-list'
+    }, {
+        action: () => {
+            toggleClaude();
+        },
+        text: 'Claude Assistant',
+        icon: 'mdi mdi-claude'
     }]);
     
     let currentDialog = $state<'none' | 'appFeature' | 'appDesign' | 'appSaveLoad' | 'appBuildForm' | 'appIdSearch' | 'dlgBackpack' | 'appRowList' | 'appGlobalSettings' | 'appSearchForm'>('none');
@@ -361,14 +375,16 @@
     let fileInput: HTMLInputElement;
     
     
+    // Width reserved for the docked Claude sidebar (it overlays the page on narrow screens).
+    let claudeSpace = $derived(claudeUi.open && $winWidth >= 900 ? claudeUi.width : 0);
     let pointBarIsOn = $derived(app.pointTypes.length > 0 || app.backpack.length > 0 || app.importedChoicesIsOpen);
     let pointBar = $derived.by(() => {
         const styles: string[] = [];
 
         if (useAltMenu.value) {
-            styles.push(`max-width: 100%;`);
+            styles.push(`max-width: calc(100% - ${claudeSpace}px);`);
         } else {
-            styles.push(`max-width: calc(100% - 56px);`);
+            styles.push(`max-width: calc(100% - ${56 + claudeSpace}px);`);
         }
 
         if (app.styling.barBackgroundImage) {
@@ -438,10 +454,14 @@
             styles.push(`padding-top: 32px;`);
         }
 
+        if (claudeSpace > 0) {
+            styles.push(`margin-right: ${claudeSpace}px;`);
+        }
+
         return styles.join(' ');
     });
     let creatorMenu = $derived(app.showMusicPlayer ? 'padding-top: 32px; height: auto;' : 'height: auto;');
-    let bgmBar = $derived(useAltMenu.value ? 'max-width: 100vw;' : 'max-width: calc(100vw - 56px);');
+    let bgmBar = $derived(useAltMenu.value ? `max-width: calc(100vw - ${claudeSpace}px);` : `max-width: calc(100vw - ${56 + claudeSpace}px);`);
     let bgmTime = $derived.by(() => {
         return `${calTime(bgmVariables.curBgmTime)} | ${calTime(bgmVariables.curBgmLength)}`;
     });

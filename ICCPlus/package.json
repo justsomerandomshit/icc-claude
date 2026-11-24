@@ -29,7 +29,11 @@
     "vite": "^8.3.5"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.12.0",
     "@antv/expr": "^1.0.2",
+    "@material/dom": "^14.0.0",
+    "@material/select": "^14.0.0",
+    "@material/textfield": "^14.0.0",
     "@smui-extra/accordion": "^9.0.6",
     "@smui-extra/autocomplete": "^9.0.6",
     "@smui-extra/chip-input": "^9.0.6",

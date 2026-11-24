@@ -2,11 +2,14 @@ import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { fileURLToPath, URL } from 'node:url'
 import legacy from '@vitejs/plugin-legacy'
+import { claudeCodeBridge } from './claude-code-bridge'
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
     svelte(),
+    // Local-only: lets the Claude sidebar use Claude Code on this computer (dev server / launcher)
+    claudeCodeBridge(),
     legacy({
       targets: [
         'chrome >= 49',
@@ -39,6 +42,12 @@ export default defineConfig({
         chunkFileNames: 'js/[name].[hash].js',
         codeSplitting: {
           groups: [
+            {
+              // Claude sidebar SDK: only loaded when the sidebar is opened
+              name: 'chunk-claude',
+              test: /node_modules[\\/]@anthropic-ai[\\/]/,
+              priority: 20,
+            },
             {
               name: 'chunk-vendors',
               test: /node_modules/,
