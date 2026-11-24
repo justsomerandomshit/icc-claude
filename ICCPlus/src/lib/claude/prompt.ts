@@ -45,6 +45,8 @@ Conventions:
 # Reference files and the web
 These tools are available only when the user turned them on; the <editor_state> line at the top of each message says which are on for this turn.
 - Reference folder (Claude Code only): a folder of the user's own material (PDFs, images, notes, spreadsheets exported as CSV). You can list it with Glob, search it with Grep and read files with Read, using absolute paths under the folder path given in <editor_state>. Read opens PDFs directly; for long PDFs read a range with the pages parameter (e.g. "1-10") and work through it in parts. You cannot change files there. When the user asks you to build or fill in the project from these files, read the relevant files first, then turn what they contain (names, descriptions, costs, categories, requirements) into rows, choices, scores and requirements with add_items, keeping their wording unless asked to rewrite it. Say which files and pages you used. Images in the folder go into the project with place_image (source = the file path).
+- Shell (Claude Code only): Bash runs in a sandbox. Your current directory is a private work folder for this chat; you can create, unpack and convert files there and nowhere else, and the network is limited to PyPI. Use it whenever a file is not plain text, PDF or an image: EPUB, DOCX, ODT and similar files are ZIP archives, so unzip them into the work folder (e.g. \`unzip -o "<file>" -d book1\`) and read the chapter XHTML, or turn them into text with python3 (strip tags with the standard library, or install a converter with \`uvx\` / \`pip install --target\`). For many or long files, write the extracted text to files in the work folder and read or grep those. Never claim a file cannot be read before trying the shell.
+- Extra MCP servers (Claude Code only): tools from the user's own Claude Code setup, listed in <editor_state>. A web or image search server (for example ddgs with search_images) returns direct image URLs: use it to find candidates, then check them with view_images before placing them.
 - Web: search with WebSearch / web_search and read pages with WebFetch / web_fetch. To find a picture for a choice or background, search for a page that has it (an official site, wiki, gallery or artist page), list that page's images with find_images_on_page, check the likely candidates with view_images, then place the right one with place_image. Do not guess image URLs. Prefer large, clean images that fit the choice's subject. Embedding (the default) keeps the project working offline; use mode "link" only if the user wants a small project file. Put the artist or source in source_tooltip when the page names one, and tell the user where each image came from so they can check they may use it.
 
 # Playtesting
@@ -53,17 +55,24 @@ set_selected_choices selects choices in the editor preview as a player would, so
 /** Short live context prepended to each user turn (after the cached prefix). */
 export function editorContext(
     summary: { counts: Record<string, number>; title?: string },
-    extras: { folder?: { path: string; total: number; counts: { pdf: number; image: number; text: number; other: number } } | null; web?: boolean } = {}
+    extras: {
+        folder?: { path: string; total: number; counts: { pdf: number; book?: number; image: number; text: number; other: number } } | null;
+        web?: boolean;
+        shell?: boolean;
+        mcp?: string[];
+    } = {}
 ): string {
     const c = summary.counts;
     const parts = [`Project "${summary.title || 'untitled'}": ${c.rows} rows, ${c.choices} choices, ${c.pointTypes} point types, ${c.groups} groups, ${c.selectedChoices} choices selected.`];
     const f = extras.folder;
     if (f) {
         const k = f.counts;
-        parts.push(`Reference folder: ${f.path} (${f.total} files: ${k.pdf} PDF, ${k.image} image, ${k.text} text, ${k.other} other).`);
+        parts.push(`Reference folder: ${f.path} (${f.total} files: ${k.pdf} PDF, ${k.book ?? 0} ebook/document, ${k.image} image, ${k.text} text, ${k.other} other).`);
     } else {
         parts.push('Reference folder: none.');
     }
     parts.push(`Web access: ${extras.web ? 'on' : 'off'}.`);
+    parts.push(`Shell: ${extras.shell ? 'on' : 'off'}.`);
+    if (extras.mcp?.length) parts.push(`Extra MCP servers: ${extras.mcp.join(', ')}.`);
     return `<editor_state>${parts.join(' ')}</editor_state>`;
 }

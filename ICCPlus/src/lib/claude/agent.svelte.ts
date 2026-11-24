@@ -6,7 +6,7 @@
 // Either way the tools execute here, against the live project.
 
 import Anthropic from '@anthropic-ai/sdk';
-import { claudeSettings, createClient, describeApiError, type Backend } from './settings.svelte';
+import { claudeSettings, createClient, describeApiError, enabledMcp, type Backend } from './settings.svelte';
 import { SYSTEM_PROMPT, editorContext } from './prompt';
 import { describeToolCall, MUTATING_TOOLS, runTool, toolDefinitions, ToolInputError, type Attachment } from './tools';
 import { readFileAsDataUrl, toModelImage, type ModelImage } from './images';
@@ -69,7 +69,7 @@ const CC_PREFIX = 'mcp__icc__';
 const CC_TOOL_NOTE = `
 
 # Tool names in this session
-The editor tools are called through MCP, so their full names start with "${CC_PREFIX}": call ${CC_PREFIX}add_items, ${CC_PREFIX}edit_project, ${CC_PREFIX}place_image and so on. This prompt names them without the prefix. Claude Code's own tools (Read, Glob, Grep, WebSearch, WebFetch) have no prefix.`;
+The editor tools are called through MCP, so their full names start with "${CC_PREFIX}": call ${CC_PREFIX}add_items, ${CC_PREFIX}edit_project, ${CC_PREFIX}place_image and so on. This prompt names them without the prefix. Claude Code's own tools (Read, Glob, Grep, Bash, WebSearch, WebFetch) have no prefix. Tools from the user's other MCP servers are named mcp__<server>__<tool>.`;
 
 function newId() {
     return typeof crypto.randomUUID === 'function'
@@ -176,6 +176,11 @@ export async function newChat() {
 }
 
 export async function deleteChat(id: string) {
+    // Claude Code chats have a private work folder (unpacked books, converted files); remove it too.
+    const r = await loadChatRecord(id).catch(() => null);
+    if (r?.backend === 'claude-code' && r.sessionId) {
+        fetch('./__claude-code/forget', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: r.sessionId }) }).catch(() => {});
+    }
     await deleteChatRecord(id);
     chat.list = await listChats();
     if (chat.id === id) resetState();
@@ -256,7 +261,9 @@ export async function send(text: string, files: File[] = []) {
     try {
         context = editorContext(projectSummary(snapshotProject()), {
             folder: backend === 'claude-code' ? claudeSettings.folder : null,
-            web: claudeSettings.web
+            web: claudeSettings.web,
+            shell: backend === 'claude-code' && claudeSettings.shell,
+            mcp: backend === 'claude-code' ? enabledMcp() : []
         });
     } catch {
         // project not ready - skip context
@@ -519,7 +526,9 @@ async function runClaudeCodeTurn(ui: UiMessage, content: BetaContentBlockParam[]
                 systemPrompt: SYSTEM_PROMPT + CC_TOOL_NOTE,
                 tools,
                 folder: claudeSettings.folder?.path ?? null,
-                web: claudeSettings.web
+                web: claudeSettings.web,
+                shell: claudeSettings.shell,
+                mcp: enabledMcp()
             }),
             signal: abort.signal
         });

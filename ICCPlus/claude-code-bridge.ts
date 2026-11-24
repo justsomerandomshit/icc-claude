@@ -11,17 +11,20 @@
 //   GET  /__claude-code/local-image   an image file inside the chosen reference folder
 //   GET  /__claude-code/web-image     download an image from the web (no CORS in the way)
 //   GET  /__claude-code/page-images   list the images on a web page
+//   POST /__claude-code/forget        delete a chat's private work folder
 //
 // Each turn spawns `claude -p` with the user's own Claude Code login and one MCP server ("icc")
-// whose tools are executed by the open editor page. Built-in tools are limited to reading the
-// user's reference folder (Read/Glob/Grep, nothing outside it) and the web (WebSearch/WebFetch).
-// Sessions are resumed with --resume so the conversation carries over between turns.
+// whose tools are executed by the open editor page, plus any of the user's own Claude Code MCP
+// servers they switched on. Built-in tools: reading the reference folder (Read/Glob/Grep, nothing
+// else outside the chat's work folder), the web (WebSearch/WebFetch), and a sandboxed shell
+// (Bash) that can write only inside the chat's work folder and reach only PyPI. Each chat has its
+// own work folder, which is also the Claude Code working directory, so --resume finds the session.
 
 import type { Plugin, ViteDevServer } from 'vite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { createReadStream, existsSync, mkdirSync } from 'node:fs';
-import { readdir, realpath, stat } from 'node:fs/promises';
+import { readdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { lookup } from 'node:dns/promises';
 import net from 'node:net';
 import { homedir } from 'node:os';
@@ -160,7 +163,7 @@ async function resolveFolder(input: unknown): Promise<string> {
 
 /** Count files by kind so the sidebar can show what Claude will see. */
 async function folderSummary(root: string) {
-    const counts = { pdf: 0, image: 0, text: 0, other: 0 };
+    const counts = { pdf: 0, book: 0, image: 0, text: 0, other: 0 };
     let total = 0;
     let truncated = false;
     const walk = async (dir: string, depth: number) => {
@@ -181,6 +184,7 @@ async function folderSummary(root: string) {
                 }
                 const ext = path.extname(e.name).toLowerCase();
                 if (ext === '.pdf') counts.pdf++;
+                else if (['.epub', '.mobi', '.azw3', '.docx', '.doc', '.odt', '.pages', '.fb2'].includes(ext)) counts.book++;
                 else if (IMAGE_EXT.has(ext)) counts.image++;
                 else if (['.txt', '.md', '.json', '.csv', '.html', '.htm', '.xml', '.rtf'].includes(ext)) counts.text++;
                 else counts.other++;
@@ -332,6 +336,64 @@ function extractImages(html: string, base: string, limit: number) {
     return { title, total: images.length, images: images.slice(0, limit) };
 }
 
+/**
+ * The user's own MCP servers from their Claude Code setup (user scope in ~/.claude.json, local
+ * scope for this repo, and the repo's .mcp.json). Configs stay on this computer: the page only
+ * sees names and types, and picks which ones the sidebar may use.
+ */
+async function userMcpServers(repoRoot: string): Promise<Record<string, Record<string, unknown>>> {
+    const out: Record<string, Record<string, unknown>> = {};
+    const add = (servers: unknown) => {
+        if (!servers || typeof servers !== 'object') return;
+        for (const [name, cfg] of Object.entries(servers as Record<string, unknown>)) {
+            if (name !== 'icc' && /^[\w-]{1,64}$/.test(name) && cfg && typeof cfg === 'object') out[name] = cfg as Record<string, unknown>;
+        }
+    };
+    try {
+        const d = JSON.parse(await readFile(path.join(homedir(), '.claude.json'), 'utf8'));
+        add(d.mcpServers);
+        for (const dir of [repoRoot, path.dirname(repoRoot)]) add(d.projects?.[dir]?.mcpServers);
+    } catch {
+        // no Claude Code config yet
+    }
+    for (const dir of [repoRoot, path.dirname(repoRoot)]) {
+        try {
+            add(JSON.parse(await readFile(path.join(dir, '.mcp.json'), 'utf8')).mcpServers);
+        } catch {
+            // none
+        }
+    }
+    return out;
+}
+
+/**
+ * Sandbox for the shell: writes only in the chat's work folder (and a shared package cache),
+ * network only to PyPI (for converters installed with uvx/pip), and no reading of credentials,
+ * browser data or Claude's own files.
+ */
+function shellSettings(toolsDir: string) {
+    const home = '~';
+    const deny = [
+        `${home}/.claude.json`, `${home}/.claude/**`, `${home}/.ssh/**`, `${home}/.aws/**`, `${home}/.config/**`, `${home}/.gnupg/**`,
+        `${home}/.netrc`, `${home}/.npmrc`, `${home}/.pypirc`, `${home}/.docker/**`, `${home}/.kube/**`, `${home}/.zsh_history`,
+        `${home}/.bash_history`, `${home}/.local/share/**`, `${home}/Library/Keychains/**`, `${home}/Library/Cookies/**`,
+        `${home}/Library/Application Support/**`, `${home}/Library/Containers/**`, `${home}/Library/Group Containers/**`,
+        `${home}/Library/Messages/**`, `${home}/Library/Mail/**`, `${home}/Library/Safari/**`
+    ].map((p) => `Read(${p})`);
+    return {
+        sandbox: { enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false },
+        permissions: {
+            allow: ['WebFetch(domain:pypi.org)', 'WebFetch(domain:files.pythonhosted.org)', `Edit(/${toolsDir}/**)`],
+            deny
+        }
+    };
+}
+
+/** Where Claude Code keeps a session's transcript for a given working directory. */
+function sessionFile(cwd: string, sessionId: string) {
+    return path.join(homedir(), '.claude/projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${sessionId}.jsonl`);
+}
+
 function pickFolderDialog(): Promise<{ path?: string; cancelled?: boolean; error?: string }> {
     if (process.platform !== 'darwin') return Promise.resolve({ error: 'The folder chooser only works on macOS. Type the folder path instead.' });
     return new Promise((resolve) => {
@@ -385,6 +447,8 @@ export function claudeCodeBridge(): Plugin {
                     tools?: ToolDef[];
                     folder?: string | null;
                     web?: boolean;
+                    shell?: boolean;
+                    mcp?: string[];
                 };
                 try {
                     body = JSON.parse(await readBody(req));
@@ -401,10 +465,28 @@ export function claudeCodeBridge(): Plugin {
                         return sendJson(res, 400, { error: `Reference folder: ${(e as Error).message}` });
                     }
                 }
-                // Built-in tools: read-only access to the reference folder, and the web. Reads are
-                // allowed inside the working directories only (dontAsk denies everything else).
-                const builtIn = [...(folder ? ['Read', 'Glob', 'Grep'] : []), ...(body.web ? ['WebSearch', 'WebFetch'] : [])];
+                // Built-in tools. Reads are allowed inside the working directories only (dontAsk
+                // denies everything else); the shell runs sandboxed (see shellSettings).
+                const builtIn = [
+                    ...(folder || body.shell ? ['Read', 'Glob', 'Grep'] : []),
+                    ...(body.shell ? ['Bash'] : []),
+                    ...(body.web ? ['WebSearch', 'WebFetch'] : [])
+                ];
                 const allowed = ['mcp__icc', ...(body.web ? ['WebSearch', 'WebFetch'] : [])];
+                // The user's own MCP servers they switched on for the sidebar.
+                const known = await userMcpServers(server.config.root);
+                const extraMcp: Record<string, Record<string, unknown>> = {};
+                for (const name of Array.isArray(body.mcp) ? body.mcp : []) {
+                    if (typeof name === 'string' && known[name]) {
+                        extraMcp[name] = known[name];
+                        allowed.push(`mcp__${name}`);
+                    }
+                }
+                // Each chat works in its own folder. Chats from before this existed ran in the shared
+                // folder; keep using it for them so their sessions still resume.
+                let cwd = path.join(workspace, 'chats', body.sessionId);
+                if (body.resume && !existsSync(sessionFile(cwd, body.sessionId)) && existsSync(sessionFile(workspace, body.sessionId))) cwd = workspace;
+                const toolsDir = path.join(workspace, 'tools');
 
                 const run: Run = { id: randomUUID(), tools: body.tools, child: null, res, pending: new Map(), closed: false };
                 runs.set(run.id, run);
@@ -415,9 +497,10 @@ export function claudeCodeBridge(): Plugin {
                 res.flushHeaders?.();
                 emit(run, { kind: 'run', runId: run.id });
 
-                mkdirSync(workspace, { recursive: true });
+                mkdirSync(cwd, { recursive: true });
+                mkdirSync(toolsDir, { recursive: true });
                 const mcpConfig = JSON.stringify({
-                    mcpServers: { icc: { type: 'http', url: `http://${req.headers.host}${PREFIX}/mcp/${run.id}` } }
+                    mcpServers: { ...extraMcp, icc: { type: 'http', url: `http://${req.headers.host}${PREFIX}/mcp/${run.id}` } }
                 });
                 const args = [
                     '-p',
@@ -432,13 +515,24 @@ export function claudeCodeBridge(): Plugin {
                     ...(folder ? ['--add-dir', folder] : []),
                     '--permission-mode', 'dontAsk',
                     '--setting-sources', '',
+                    ...(body.shell ? ['--settings', JSON.stringify(shellSettings(toolsDir))] : []),
                     '--system-prompt', String(body.systemPrompt ?? '')
                 ];
                 args.push(...(body.resume ? ['--resume', body.sessionId] : ['--session-id', body.sessionId]));
                 if (body.model && body.model !== 'default' && MODEL_RE.test(body.model)) args.push('--model', body.model);
                 if (body.effort && EFFORTS.has(body.effort)) args.push('--effort', body.effort);
 
-                const child = spawn(bin, args, { cwd: workspace, env: childEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+                // Package caches go where the sandbox lets the shell write.
+                const env = {
+                    ...childEnv(),
+                    UV_CACHE_DIR: path.join(toolsDir, 'uv-cache'),
+                    UV_TOOL_DIR: path.join(toolsDir, 'uv-tools'),
+                    UV_PYTHON_INSTALL_DIR: path.join(toolsDir, 'uv-python'),
+                    PIP_CACHE_DIR: path.join(toolsDir, 'pip-cache'),
+                    XDG_CACHE_HOME: path.join(toolsDir, 'cache'),
+                    XDG_DATA_HOME: path.join(toolsDir, 'data')
+                };
+                const child = spawn(bin, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
                 run.child = child;
 
                 let buffer = '';
@@ -572,7 +666,11 @@ export function claudeCodeBridge(): Plugin {
                             loggedIn: Boolean(auth.loggedIn),
                             authMethod: auth.authMethod ?? null,
                             email: auth.email ?? null,
-                            subscription: auth.subscriptionType ?? null
+                            subscription: auth.subscriptionType ?? null,
+                            mcpServers: Object.entries(await userMcpServers(server.config.root)).map(([name, cfg]) => ({
+                                name,
+                                type: String(cfg.type ?? (cfg.command ? 'stdio' : 'http'))
+                            }))
                         });
                     }
                     if (route === '/run' && req.method === 'POST') return await handleRun(req, res);
@@ -580,6 +678,12 @@ export function claudeCodeBridge(): Plugin {
                     if (route === '/stop' && req.method === 'POST') return await handleStop(req, res);
                     if (route.startsWith('/mcp/')) return await handleMcp(route.slice(5), req, res);
                     const query = new URL(url, 'http://localhost').searchParams;
+                    if (route === '/forget' && req.method === 'POST') {
+                        const body = JSON.parse(await readBody(req)) as { sessionId?: string };
+                        if (!body.sessionId || !SESSION_RE.test(body.sessionId)) return sendJson(res, 400, { error: 'sessionId must be a UUID' });
+                        await rm(path.join(workspace, 'chats', body.sessionId), { recursive: true, force: true });
+                        return sendJson(res, 200, { ok: true });
+                    }
                     if (route === '/pick-folder' && req.method === 'POST') {
                         const picked = await pickFolderDialog();
                         if (!picked.path) return sendJson(res, 200, picked);

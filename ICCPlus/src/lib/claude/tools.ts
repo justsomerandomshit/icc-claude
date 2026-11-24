@@ -226,7 +226,14 @@ export function describeToolCall(name: string, input: Json): string {
         case 'Grep': return `Searching files for "${i.pattern ?? ''}"`;
         case 'WebSearch': case 'web_search': return `Searching the web for "${i.query ?? ''}"`;
         case 'WebFetch': case 'web_fetch': return `Reading ${hostOf(i.url)}`;
-        default: return name;
+        case 'Bash': return `Running: ${String(i.description || i.command || 'a command').slice(0, 120)}`;
+        default: {
+            // Tools from the user's own MCP servers: "mcp__ddgs__search_images" -> "ddgs: search images "query""
+            const m = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name);
+            if (!m) return name;
+            const what = i.query ?? i.keywords ?? i.q ?? i.url;
+            return `${m[1]}: ${m[2].replace(/_/g, ' ')}${what ? ` "${String(what).slice(0, 80)}"` : ''}`;
+        }
     }
 }
 

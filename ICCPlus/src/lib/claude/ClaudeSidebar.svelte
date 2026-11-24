@@ -188,6 +188,24 @@
                     </span>
                 </label>
                 {#if claudeSettings.backend === 'claude-code'}
+                    <label class="cs-check">
+                        <input type="checkbox" bind:checked={claudeSettings.shell} onchange={persistSettings} />
+                        <span>
+                            Let Claude run commands (unzip, convert, Python)
+                            <small class="cs-fine">Sandboxed: it can only write in its own work folder for each chat, can't read your passwords or browser data, and can only reach PyPI.</small>
+                        </span>
+                    </label>
+                    {#if claudeCode.mcpServers?.length}
+                        <div class="cs-mcp">
+                            <div class="cs-mcp-head">Tools from your Claude Code setup</div>
+                            {#each claudeCode.mcpServers as server (server.name)}
+                                <label class="cs-check">
+                                    <input type="checkbox" checked={mcpOn.includes(server.name)} onchange={(e) => setMcpEnabled(server.name, (e.currentTarget as HTMLInputElement).checked)} />
+                                    <span>{server.name} <small class="cs-fine cs-inline">{server.type === 'stdio' ? 'runs on this Mac' : 'online service'}</small></span>
+                                </label>
+                            {/each}
+                        </div>
+                    {/if}
                     <div class="cs-field">
                         <span>Reference folder</span>
                         {#if claudeSettings.folder}
@@ -384,6 +402,8 @@
         MODELS,
         persistSettings,
         pickReferenceFolder,
+        enabledMcp,
+        setMcpEnabled,
         refreshReferenceFolder,
         setReferenceFolder,
         signIn,
@@ -425,6 +445,11 @@
     let stickToBottom = true;
     let winWidth = $state(window.innerWidth);
     let dark = $state(editorIsDark());
+    let mcpOn = $derived.by(() => {
+        void claudeSettings.mcp;
+        void claudeCode.mcpServers;
+        return enabledMcp();
+    });
     let folderBusy = $state(false);
     let folderError = $state('');
     let folderTyping = $state(false);
@@ -432,7 +457,7 @@
 
     function folderCounts(f: ReferenceFolder) {
         const c = f.counts;
-        const parts = [c.pdf && `${c.pdf} PDF${c.pdf === 1 ? '' : 's'}`, c.image && `${c.image} image${c.image === 1 ? '' : 's'}`, c.text && `${c.text} text file${c.text === 1 ? '' : 's'}`, c.other && `${c.other} other`].filter(Boolean);
+        const parts = [c.pdf && `${c.pdf} PDF${c.pdf === 1 ? '' : 's'}`, c.book && `${c.book} ebook${c.book === 1 ? '' : 's'}/doc${c.book === 1 ? '' : 's'}`, c.image && `${c.image} image${c.image === 1 ? '' : 's'}`, c.text && `${c.text} text file${c.text === 1 ? '' : 's'}`, c.other && `${c.other} other`].filter(Boolean);
         return `${f.total}${f.truncated ? '+' : ''} file${f.total === 1 ? '' : 's'}${parts.length ? `: ${parts.join(', ')}` : ''}`;
     }
 
@@ -1133,6 +1158,24 @@
     }
     .cs-check small {
         display: block;
+    }
+    .cs-mcp {
+        display: grid;
+        gap: 6px;
+    }
+    .cs-mcp-head {
+        font-size: 12px;
+        color: var(--cs-muted);
+    }
+    .cs-check:has(small:not(.cs-inline)) {
+        align-items: flex-start;
+    }
+    .cs-check:has(small:not(.cs-inline)) input {
+        margin-top: 3px;
+    }
+    .cs-check small.cs-inline {
+        display: inline;
+        margin-left: 4px;
     }
     .cs-folder-card {
         border: 1px solid var(--cs-line);

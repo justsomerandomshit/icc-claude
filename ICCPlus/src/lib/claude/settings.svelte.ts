@@ -28,13 +28,15 @@ export type ReferenceFolder = {
     name: string;
     total: number;
     truncated?: boolean;
-    counts: { pdf: number; image: number; text: number; other: number };
+    counts: { pdf: number; book?: number; image: number; text: number; other: number };
 };
 
 type Persisted = {
     backend?: Backend | null;
     folder?: ReferenceFolder | null;
     web?: boolean;
+    shell?: boolean;
+    mcp?: string[] | null;
     apiKey?: string;
     workspaceId?: string;
     model?: string;
@@ -65,6 +67,10 @@ export const claudeSettings = $state({
     folder: (initial.folder ?? null) as ReferenceFolder | null,
     /** Let Claude search and read the web (Claude Code tools, or the API's web search/fetch). */
     web: initial.web ?? true,
+    /** Claude Code only: let it run commands in a sandbox (unzip, convert files, run Python). */
+    shell: initial.shell ?? true,
+    /** Claude Code only: which of the user's own Claude Code MCP servers the sidebar may use (null = defaults). */
+    mcp: (initial.mcp ?? null) as string[] | null,
     /** Display info about the signed-in account, filled after verification. */
     account: null as null | { keyHint: string }
 });
@@ -77,7 +83,9 @@ export function persistSettings() {
             effort: claudeSettings.effort,
             showThinking: claudeSettings.showThinking,
             folder: claudeSettings.folder,
-            web: claudeSettings.web
+            web: claudeSettings.web,
+            shell: claudeSettings.shell,
+            mcp: claudeSettings.mcp
         };
         if (claudeSettings.remember) {
             data.apiKey = claudeSettings.apiKey;
@@ -99,6 +107,8 @@ export type ClaudeCodeStatus = {
     email?: string | null;
     authMethod?: string | null;
     subscription?: string | null;
+    /** MCP servers configured in the user's Claude Code setup. */
+    mcpServers?: { name: string; type: string }[];
 };
 
 export const claudeCode = $state<ClaudeCodeStatus>({ checked: false, checking: false, bridge: false, available: false, loggedIn: false });
@@ -118,7 +128,8 @@ export async function checkClaudeCode() {
             version: s.version,
             email: s.email,
             authMethod: s.authMethod,
-            subscription: s.subscription
+            subscription: s.subscription,
+            mcpServers: Array.isArray(s.mcpServers) ? s.mcpServers : []
         });
     } catch {
         Object.assign(claudeCode, { bridge: false, available: false, loggedIn: false });
@@ -178,6 +189,24 @@ export async function refreshReferenceFolder() {
 
 export function setReferenceFolder(folder: ReferenceFolder | null) {
     claudeSettings.folder = folder;
+    persistSettings();
+}
+
+/** Servers switched on by default: web search ones, which the sidebar is built to use. */
+const DEFAULT_MCP = /^(ddgs|duckduckgo|brave|tavily|exa|search|web)/i;
+
+/** The user's MCP servers the sidebar will use, limited to ones that still exist. */
+export function enabledMcp(): string[] {
+    const available = (claudeCode.mcpServers ?? []).map((s) => s.name);
+    const chosen = claudeSettings.mcp ?? available.filter((n) => DEFAULT_MCP.test(n));
+    return chosen.filter((n) => available.includes(n));
+}
+
+export function setMcpEnabled(name: string, on: boolean) {
+    const current = new Set(enabledMcp());
+    if (on) current.add(name);
+    else current.delete(name);
+    claudeSettings.mcp = [...current];
     persistSettings();
 }
 
