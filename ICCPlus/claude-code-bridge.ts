@@ -367,11 +367,13 @@ async function userMcpServers(repoRoot: string): Promise<Record<string, Record<s
 }
 
 /**
- * Sandbox for the shell: writes only in the chat's work folder (and a shared package cache),
- * network only to PyPI (for converters installed with uvx/pip), and no reading of credentials,
- * browser data or Claude's own files.
+ * Sandbox for the shell: writes only in the chat's work folder (and a shared package cache, never
+ * the reference folder), network only to PyPI (for converters installed with uvx/pip), and no
+ * reading of credentials, browser data or Claude's own files. The sandbox is enforced by the OS,
+ * so every command is pre-approved: in dontAsk mode anything that would ask is refused, and
+ * Claude Code asks about any command whose effects it can't work out (loops, variables, $(...)).
  */
-function shellSettings(toolsDir: string) {
+function shellSettings(toolsDir: string, folder: string | null) {
     const home = '~';
     const deny = [
         `${home}/.claude.json`, `${home}/.claude/**`, `${home}/.ssh/**`, `${home}/.aws/**`, `${home}/.config/**`, `${home}/.gnupg/**`,
@@ -383,8 +385,8 @@ function shellSettings(toolsDir: string) {
     return {
         sandbox: { enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false },
         permissions: {
-            allow: ['WebFetch(domain:pypi.org)', 'WebFetch(domain:files.pythonhosted.org)', `Edit(/${toolsDir}/**)`],
-            deny
+            allow: ['Bash', 'WebFetch(domain:pypi.org)', 'WebFetch(domain:files.pythonhosted.org)', `Edit(/${toolsDir}/**)`],
+            deny: [...deny, ...(folder ? [`Edit(/${folder}/**)`] : [])]
         }
     };
 }
@@ -472,7 +474,7 @@ export function claudeCodeBridge(): Plugin {
                     ...(body.shell ? ['Bash'] : []),
                     ...(body.web ? ['WebSearch', 'WebFetch'] : [])
                 ];
-                const allowed = ['mcp__icc', ...(body.web ? ['WebSearch', 'WebFetch'] : [])];
+                const allowed = ['mcp__icc', ...(body.shell ? ['Bash'] : []), ...(body.web ? ['WebSearch', 'WebFetch'] : [])];
                 // The user's own MCP servers they switched on for the sidebar.
                 const known = await userMcpServers(server.config.root);
                 const extraMcp: Record<string, Record<string, unknown>> = {};
@@ -499,6 +501,9 @@ export function claudeCodeBridge(): Plugin {
 
                 mkdirSync(cwd, { recursive: true });
                 mkdirSync(toolsDir, { recursive: true });
+                // Temp files stay inside the work folder, where the shell may write and Read may look.
+                const tmpDir = path.join(cwd, '.tmp');
+                mkdirSync(tmpDir, { recursive: true });
                 const mcpConfig = JSON.stringify({
                     mcpServers: { ...extraMcp, icc: { type: 'http', url: `http://${req.headers.host}${PREFIX}/mcp/${run.id}` } }
                 });
@@ -515,7 +520,7 @@ export function claudeCodeBridge(): Plugin {
                     ...(folder ? ['--add-dir', folder] : []),
                     '--permission-mode', 'dontAsk',
                     '--setting-sources', '',
-                    ...(body.shell ? ['--settings', JSON.stringify(shellSettings(toolsDir))] : []),
+                    ...(body.shell ? ['--settings', JSON.stringify(shellSettings(toolsDir, folder))] : []),
                     '--system-prompt', String(body.systemPrompt ?? '')
                 ];
                 args.push(...(body.resume ? ['--resume', body.sessionId] : ['--session-id', body.sessionId]));
@@ -530,7 +535,8 @@ export function claudeCodeBridge(): Plugin {
                     UV_PYTHON_INSTALL_DIR: path.join(toolsDir, 'uv-python'),
                     PIP_CACHE_DIR: path.join(toolsDir, 'pip-cache'),
                     XDG_CACHE_HOME: path.join(toolsDir, 'cache'),
-                    XDG_DATA_HOME: path.join(toolsDir, 'data')
+                    XDG_DATA_HOME: path.join(toolsDir, 'data'),
+                    TMPDIR: tmpDir
                 };
                 const child = spawn(bin, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
                 run.child = child;
